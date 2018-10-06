@@ -1,60 +1,55 @@
-"""
-This script generates extracted features for each video, which other
-models make use of.
-
-You can change you sequence length and limit to a set number of classes
-below.
-
-class_limit is an integer that denotes the first N classes you want to
-extract features from. This is useful is you don't want to wait to
-extract all 101 classes. For instance, set class_limit = 8 to just
-extract features for the first 8 (alphabetical) classes in the dataset.
-Then set the same number when training models.
-"""
+from keras.preprocessing import image
+from keras.applications.inception_v3 import InceptionV3, preprocess_input
+from keras.models import Model, load_model
+from keras.layers import Input
 import numpy as np
-import os.path
-from data import DataSet
-from extractor import Extractor
-from tqdm import tqdm
 
-# Set defaults.
-seq_length = 40
-class_limit = None  # Number of classes to extract. Can be 1-101 or None for all.
+class Extractor():
+    def __init__(self, weights=None):
+        """Either load pretrained from imagenet, or load our saved
+        weights from our own training."""
 
-# Get the dataset.
-data = DataSet(seq_length=seq_length, class_limit=class_limit)
+        self.weights = weights  # so we can check elsewhere which model
 
-# get the model.
-model = Extractor()
+        if weights is None:
+            # Get model with pretrained weights.
+            base_model = InceptionV3(
+                weights='imagenet',
+                include_top=True
+            )
 
-# Loop through data.
-pbar = tqdm(total=len(data.data))
-for video in data.data:
+            # We'll extract features at the final pool layer.
+            self.model = Model(
+                inputs=base_model.input,
+                outputs=base_model.get_layer('avg_pool').output
+            )
 
-    # Get the path to the sequence for this video.
-    path = os.path.join('data', 'sequences', video[2] + '-' + str(seq_length) + \
-        '-features')  # numpy will auto-append .npy
+        else:
+            # Load the model first.
+            self.model = load_model(weights)
 
-    # Check if we already have it.
-    if os.path.isfile(path + '.npy'):
-        pbar.update(1)
-        continue
+            # Then remove the top so we get features not predictions.
+            # From: https://github.com/fchollet/keras/issues/2371
+            self.model.layers.pop()
+            self.model.layers.pop()  # two pops to get to pool layer
+            self.model.outputs = [self.model.layers[-1].output]
+            self.model.output_layers = [self.model.layers[-1]]
+            self.model.layers[-1].outbound_nodes = []
 
-    # Get the frames for this video.
-    frames = data.get_frames_for_sample(video)
+    def extract(self, image_path):
+        # img = image.load_img(image_path, target_size=(299, 299))
+        x = image.img_to_array(image_path)
+        x = np.expand_dims(x, axis=0)
+        x = preprocess_input(x)
 
-    # Now downsample to just the ones we need.
-    frames = data.rescale_list(frames, seq_length)
+        # Get the prediction.
+        features = self.model.predict(x)
 
-    # Now loop through and extract features to build the sequence.
-    sequence = []
-    for image in frames:
-        features = model.extract(image)
-        sequence.append(features)
+        if self.weights is None:
+            # For imagenet/default network:
+            features = features[0]
+        else:
+            # For loaded network:
+            features = features[0]
 
-    # Save the sequence.
-    np.save(path, sequence)
-
-    pbar.update(1)
-
-pbar.close()
+        return features
